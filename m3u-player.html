@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>M3U Player</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<style>
+:root{--bg:#0b0b10;--card:#16161e;--line:#262633;--txt:#f2f2f5;--mut:#8c8c9a;--acc:#e50914}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+header{position:sticky;top:0;z-index:5;background:linear-gradient(var(--bg),rgba(11,11,16,.95));padding:14px 16px 8px;border-bottom:1px solid var(--line)}
+h1{margin:0 0 10px;font-size:20px;letter-spacing:.5px}h1 span{color:var(--acc)}
+.row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+input[type=text],select{flex:1;min-width:140px;background:var(--card);border:1px solid var(--line);color:var(--txt);padding:10px 12px;border-radius:10px;font-size:14px}
+button,label.btn{background:var(--card);border:1px solid var(--line);color:var(--txt);padding:10px 14px;border-radius:10px;font-size:14px;cursor:pointer}
+button.pri{background:var(--acc);border-color:var(--acc)}
+button.on{border-color:var(--acc);color:var(--acc)}
+#msg{color:var(--mut);font-size:13px;padding:4px 16px}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;padding:14px 16px 40px}
+.ch{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;cursor:pointer;position:relative;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center}
+.ch:hover{border-color:var(--acc)}
+.ch img{width:64px;height:64px;object-fit:contain}
+.ph{width:64px;height:64px;display:grid;place-items:center;font-size:28px;color:var(--mut)}
+.nm{font-size:13px;font-weight:600;width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gr{font-size:11px;color:var(--mut)}
+.star{position:absolute;top:6px;right:8px;font-size:18px;color:var(--mut);background:none;border:0;padding:2px}
+.star.f{color:#ffc107}
+#pl{position:fixed;inset:0;background:#000;z-index:10;display:none}
+#pl.show{display:block}
+video{width:100%;height:100%;background:#000}
+#bar{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;gap:8px;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;background:linear-gradient(rgba(0,0,0,.8),transparent);transition:opacity .3s}
+#bar.hide{opacity:0;pointer-events:none}
+#pt{flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#err{position:absolute;inset:0;display:none;place-items:center;color:var(--mut);text-align:center;padding:30px;pointer-events:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>M3U <span>Player</span></h1>
+  <div class="row">
+    <input type="text" id="url" placeholder="Link playlist .m3u o flusso .m3u8">
+    <button class="pri" id="go">Carica</button>
+    <label class="btn">File<input type="file" id="file" accept=".m3u,.m3u8,.txt" hidden></label>
+  </div>
+  <div class="row">
+    <input type="text" id="q" placeholder="Cerca canale">
+    <select id="grp"><option value="">Tutti i gruppi</option></select>
+    <button id="favb">★ Preferiti</button>
+  </div>
+</header>
+<div id="msg">Carica una playlist per iniziare.</div>
+<div id="grid"></div>
+
+<div id="pl">
+  <video id="v" controls autoplay playsinline></video>
+  <div id="err">Impossibile riprodurre questo flusso.<br>Il server potrebbe bloccarlo o il link non è valido.</div>
+  <div id="bar"><button id="back">←</button><div id="pt"></div><button id="prev">⏮</button><button id="next">⏭</button></div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const store={get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}},
+             set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+let channels=[],favs=new Set(store.get('favs',[])),onlyFav=false,view=[],cur=-1,hls=null,hideT;
+
+function parse(text){
+  const out=[];let n='',lg='',g='Altri';
+  for(const raw of text.split(/\r?\n/)){
+    const l=raw.trim();
+    if(l.startsWith('#EXTINF')){
+      n=l.includes(',')?l.slice(l.lastIndexOf(',')+1).trim():'Canale';
+      lg=(l.match(/tvg-logo="([^"]*)"/)||[])[1]||'';
+      g=(l.match(/group-title="([^"]*)"/)||[])[1]||'Altri';
+    }else if(l&&!l.startsWith('#')){
+      out.push({name:n||l,url:l,logo:lg,group:g||'Altri'});n='';lg='';g='Altri';
+    }
+  }
+  return out;
+}
+function setChannels(list,src){
+  channels=list;
+  const gs=[...new Set(list.map(c=>c.group))].sort();
+  $('grp').innerHTML='<option value="">Tutti i gruppi</option>'+gs.map(g=>`<option>${esc(g)}</option>`).join('');
+  $('msg').textContent=list.length?`${list.length} canali caricati`:'Nessun canale trovato.';
+  if(src)store.set('playlist',src);
+  render();
+}
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function render(){
+  const q=$('q').value.toLowerCase(),g=$('grp').value;
+  view=channels.filter(c=>(!q||c.name.toLowerCase().includes(q))&&(!g||c.group===g)&&(!onlyFav||favs.has(c.url)));
+  $('grid').innerHTML=view.map((c,i)=>`<div class="ch" data-i="${i}">
+    <button class="star ${favs.has(c.url)?'f':''}" data-f="${i}">${favs.has(c.url)?'★':'☆'}</button>
+    ${c.logo?`<img src="${esc(c.logo)}" loading="lazy" onerror="this.outerHTML='<div class=ph>📺</div>'">`:'<div class="ph">📺</div>'}
+    <div class="nm">${esc(c.name)}</div><div class="gr">${esc(c.group)}</div></div>`).join('');
+}
+async function load(u){
+  $('msg').textContent='Caricamento…';
+  try{
+    const r=await fetch(u);const t=await r.text();
+    let l=parse(t);
+    if(!l.length&&/\.m3u8?(\?|$)/i.test(u))l=[{name:'Flusso',url:u,logo:'',group:'Altri'}];
+    setChannels(l,u);
+  }catch(e){
+    $('msg').textContent='Il browser non riesce a scaricare la playlist (probabile blocco CORS). Scaricala e caricala con il pulsante File.';
+  }
+}
+function play(i){
+  cur=(i+view.length)%view.length;const c=view[cur];if(!c)return;
+  $('pl').classList.add('show');$('pt').textContent=c.name;$('err').style.display='none';
+  store.set('last',c.url);
+  const v=$('v');if(hls){hls.destroy();hls=null}
+  if(window.Hls&&Hls.isSupported()){
+    hls=new Hls();hls.loadSource(c.url);hls.attachMedia(v);
+    hls.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)$('err').style.display='grid'});
+    v.play().catch(()=>{});
+  }else{
+    v.src=c.url;v.onerror=()=>$('err').style.display='grid';v.play().catch(()=>{});
+  }
+  poke();
+}
+function stop(){const v=$('v');v.pause();v.removeAttribute('src');if(hls){hls.destroy();hls=null}$('pl').classList.remove('show')}
+function poke(){$('bar').classList.remove('hide');clearTimeout(hideT);hideT=setTimeout(()=>$('bar').classList.add('hide'),3000)}
+
+$('go').onclick=()=>{const u=$('url').value.trim();if(u)load(u)};
+$('url').onkeydown=e=>{if(e.key==='Enter')$('go').click()};
+$('file').onchange=async e=>{const f=e.target.files[0];if(f)setChannels(parse(await f.text()),null)};
+$('q').oninput=render;$('grp').onchange=render;
+$('favb').onclick=()=>{onlyFav=!onlyFav;$('favb').classList.toggle('on',onlyFav);render()};
+$('grid').onclick=e=>{
+  const f=e.target.closest('[data-f]');
+  if(f){const c=view[+f.dataset.f];favs.has(c.url)?favs.delete(c.url):favs.add(c.url);store.set('favs',[...favs]);render();return}
+  const c=e.target.closest('.ch');if(c)play(+c.dataset.i);
+};
+$('back').onclick=stop;$('prev').onclick=()=>play(cur-1);$('next').onclick=()=>play(cur+1);
+$('pl').addEventListener('mousemove',poke);$('pl').addEventListener('touchstart',poke);
+document.addEventListener('keydown',e=>{
+  if(!$('pl').classList.contains('show'))return;
+  if(e.key==='Escape')stop();if(e.key==='ArrowRight')play(cur+1);if(e.key==='ArrowLeft')play(cur-1);
+});
+const saved=store.get('playlist',null);if(saved){$('url').value=saved;load(saved)}
+</script>
+</body>
+</html>
